@@ -110,6 +110,25 @@ bool ChunkParser::ParseFileInclude(bool new_scope) {
   include->diag_pos_ = lexer_.GetLastTokenOffset();
   if (!ExpectToken(Lexer::NEWLINE))
     return false;
+  // If new_scope == false, it would be possible to just ignore the next token.
+  // If a Lexer::INDENT somehow was the next token, it would fail with
+  // 'ninja: build.ninja:NNN: unexpected indent'. This might be a slightly more
+  // helpful message.
+  if (lexer_.PeekToken(Lexer::INDENT)) {
+    if (!new_scope)
+      return LexerError("indent after 'include' line is invalid.");
+    if (!lexer_.PeekToken(Lexer::CHDIR))
+      return LexerError("only 'chdir =' is allowed after 'subninja' line.");
+    if (!ExpectToken(Lexer::EQUALS))
+      return LexerError("only 'chdir =' is allowed after 'subninja' line.");
+    if (!lexer_.ReadPath(&include->chdir_, &err))
+      return OutError(err);
+
+    // The trailing '/' is added in manifest_parser.cc.
+    include->chdir_plus_slash_ = include->chdir_.str_.AsString();
+    OutItem(include);
+    return true;
+  }
   OutItem(include);
   return true;
 }

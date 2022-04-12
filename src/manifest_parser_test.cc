@@ -938,6 +938,34 @@ TEST_F(ParserTest, SubNinja) {
   EXPECT_EQ("varref outer", state.edges_[2]->EvaluateCommand());
 }
 
+TEST_F(ParserTest, SubNinjaChdir) {
+  EXPECT_TRUE(fs_.MakeDir("a"));
+  fs_.Create("a/foo.ninja",
+    "var = inner\n"
+    "rule innerrule\n"
+    "  command = foo $var\n"
+    "build $builddir/inner: innerrule\n");
+
+  ASSERT_NO_FATAL_FAILURE(AssertParse(
+"builddir = a/\n"
+"rule varref\n"
+"  command = varref $var\n"
+"var = outer\n"
+"build $builddir/outer: varref\n"
+"subninja a/foo.ninja\n"
+"  chdir = a\n"
+"build $builddir/outer2: varref\n"));
+  ASSERT_EQ(1u, fs_.files_read_.size());
+
+  EXPECT_EQ("a/foo.ninja", fs_.files_read_[0]);
+  EXPECT_TRUE(state.LookupNode("a/outer"));
+  EXPECT_TRUE(state.LookupNode("a/outer2"));
+  // Verify builddir setting is *not* inherited.
+  EXPECT_FALSE(state.LookupNode("a/inner"));
+  EXPECT_FALSE(state.LookupNode("a/" "/inner"));
+  EXPECT_TRUE(state.LookupNode("/inner"));  // $builddir expands to ""
+}
+
 TEST_F(ParserTest, MissingSubNinja) {
   ManifestParser parser(&state, &fs_);
   string err;
@@ -983,15 +1011,48 @@ TEST_F(ParserTest, Include) {
   EXPECT_EQ("inner", state.root_scope_.LookupVariable("var"));
 }
 
-TEST_F(ParserTest, BrokenInclude) {
+TEST_F(ParserTest, IncludeErrors) {
   fs_.Create("include.ninja", "build\n");
-  ManifestParser parser(&state, &fs_);
-  string err;
-  EXPECT_FALSE(parser.ParseTest("include include.ninja\n", &err));
-  EXPECT_EQ("include.ninja:1: expected path\n"
-            "build\n"
-            "     ^ near here"
-            , err);
+  {
+    ManifestParser parser(&state, &fs_);
+    string err;
+    EXPECT_FALSE(parser.ParseTest("include include.ninja\n", &err));
+    EXPECT_EQ("include.ninja:1: expected path\n"
+              "build\n"
+              "     ^ near here"
+              , err);
+  }
+  {
+    ManifestParser parser(&state, &fs_);
+    string err;
+    EXPECT_FALSE(parser.ParseTest(
+        "include include.ninja\n"
+        "  chdir = somedir\n", &err));
+    EXPECT_EQ("input:2: indent after 'include' line is invalid.\n"
+              , err);
+  }
+  {
+    ManifestParser parser(&state, &fs_);
+    string err;
+    EXPECT_FALSE(parser.ParseTest(
+        "subninja include.ninja\n"
+        "  somedir = somedir\n", &err));
+    EXPECT_EQ("input:2: only 'chdir =' is allowed after 'subninja' line.\n"
+              "  somedir = somedir\n"
+              "  ^ near here"
+              , err);
+  }
+  {
+    ManifestParser parser(&state, &fs_);
+    string err;
+    EXPECT_FALSE(parser.ParseTest(
+        "subninja include.ninja\n"
+        "  chdir dir\n", &err));
+    EXPECT_EQ("input:2: expected '=', got identifier\n"
+              "  chdir dir\n"
+              "        ^ near here"
+              , err);
+  }
 }
 
 TEST_F(ParserTest, Implicit) {

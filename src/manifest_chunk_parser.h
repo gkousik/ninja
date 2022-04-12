@@ -40,6 +40,8 @@ struct RequiredVersion {
 
 struct Include {
   LexedPath path_;
+  LexedPath chdir_;
+  std::string chdir_plus_slash_;
   bool new_scope_ = false;
   size_t diag_pos_ = 0;
 };

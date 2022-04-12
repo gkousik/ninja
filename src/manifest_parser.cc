@@ -95,6 +95,10 @@ struct ManifestFileSet {
     loaded_files_.clear();
   }
 
+  // TODO: use fork() so Getcwd() is no longer needed.
+  bool Getcwd(std::string* out_path, std::string* err);
+  bool Chdir(const std::string dir, std::string* err);
+
 private:
   FileReader *file_reader_ = nullptr;
 
@@ -103,6 +107,14 @@ private:
   /// point into the loaded files.
   std::vector<std::unique_ptr<LoadedFile>> loaded_files_;
 };
+
+bool ManifestFileSet::Getcwd(std::string* out_path, std::string* err) {
+  return file_reader_->Getcwd(out_path, err);
+}
+
+bool ManifestFileSet::Chdir(const std::string dir, std::string* err) {
+  return file_reader_->Chdir(dir, err);
+}
 
 bool ManifestFileSet::LoadFile(const std::string& filename,
                                const LoadedFile** result,
@@ -123,9 +135,12 @@ struct DfsParser {
 
 private:
   void HandleRequiredVersion(const RequiredVersion& item, Scope* scope);
-  bool HandleInclude(const Include& item, const LoadedFile& file, Scope* scope,
+  bool HandleInclude(Include& item, const LoadedFile& file, Scope* scope,
                      const LoadedFile** child_file, Scope** child_scope,
                      std::string* err);
+  bool LoadIncludeOrSubninja(Include& include, const LoadedFile& file,
+                             Scope* scope, std::vector<Clump*>* out_clumps,
+                             std::string* err);
   bool HandlePool(Pool* pool, const LoadedFile& file, std::string* err);
   bool HandleClump(Clump* clump, const LoadedFile& file, Scope* scope,
                    std::string* err);
@@ -150,7 +165,7 @@ void DfsParser::HandleRequiredVersion(const RequiredVersion& item,
   CheckNinjaVersion(version);
 }
 
-bool DfsParser::HandleInclude(const Include& include, const LoadedFile& file,
+bool DfsParser::HandleInclude(Include& include, const LoadedFile& file,
                               Scope* scope, const LoadedFile** child_file,
                               Scope** child_scope, std::string* err) {
   std::string path;
@@ -158,10 +173,63 @@ bool DfsParser::HandleInclude(const Include& include, const LoadedFile& file,
   if (!file_set_->LoadFile(path, child_file, err)) {
     return DecorateError(file, include.diag_pos_, std::string(*err), err);
   }
-  if (include.new_scope_) {
+  if (!include.chdir_plus_slash_.empty()) {
+    // Evaluate chdir expression and add '/' so the following is always valid:
+    // chdir_plus_slash_ + node.path() == node.globalPath()
+    include.chdir_plus_slash_.clear();
+    EvaluatePathInScope(&include.chdir_plus_slash_, include.chdir_,
+                        scope->GetCurrentEndOfScope());
+    include.chdir_plus_slash_ += '/';
+    include.chdir_.str_ = StringPiece(include.chdir_plus_slash_);
+
+    // Create scope so that subninja chdir variable lookups cannot see parent_
+    *child_scope = new Scope(nullptr);
+
+    Warning("subninja chdir: depending on chdir rules not ready yet.");
+  } else if (include.new_scope_) {
     *child_scope = new Scope(scope->GetCurrentEndOfScope());
   } else {
     *child_scope = scope;
+  }
+  return true;
+}
+
+bool DfsParser::LoadIncludeOrSubninja(Include& include, const LoadedFile& file,
+                                      Scope* scope,
+                                      std::vector<Clump*>* out_clumps,
+                                      std::string* err) {
+  const LoadedFile* child_file = nullptr;
+  Scope* child_scope = nullptr;
+  std::string prev_cwd;
+
+  if (!HandleInclude(include, file, scope, &child_file, &child_scope, err))
+    return false;
+
+  if (!include.chdir_plus_slash_.empty()) {
+    // The subninja chdir must be treated the same as if the ninja
+    // invocation were done solely inside the chdir. Save the current
+    // working dir and chdir into the subninja.
+    if (!file_set_->Getcwd(&prev_cwd, err)) {
+      *err = "subninja chdir \"" + include.chdir_plus_slash_ + "\": " + *err;
+      return false;
+    }
+    if (!file_set_->Chdir(include.chdir_plus_slash_, err)) {
+      *err = "subninja chdir \"" + include.chdir_plus_slash_ + "\": " + *err;
+      return false;
+    }
+  }
+
+  if (!LoadManifestTree(*child_file, child_scope, out_clumps, err))
+    return false;
+
+  if (!include.chdir_plus_slash_.empty()) {
+    // Restore the directory used by the parent of the subninja chdir.
+    // TODO: fork() could be used, though fork() and pthreads do not mix.
+    // but that would eliminate the need to restore the directory afterward.
+    if (!file_set_->Chdir(prev_cwd, err)) {
+      *err = "subninja chdir \"" + include.chdir_plus_slash_ + "\": restore " + prev_cwd + ": " + *err;
+      return false;
+    }
   }
   return true;
 }
@@ -220,7 +288,8 @@ bool DfsParser::LoadManifestTree(const LoadedFile& file, Scope* scope,
 
   // With the chunks parsed, do a depth-first parse of the ninja manifest using
   // the results of the parallel parse.
-  for (const auto& item : items) {
+  for (auto& item_nonconst : items) {
+    const auto& item = item_nonconst;
     switch (item.kind) {
     case ParserItem::kError:
       *err = item.u.error->msg_;
@@ -230,16 +299,11 @@ bool DfsParser::LoadManifestTree(const LoadedFile& file, Scope* scope,
       HandleRequiredVersion(*item.u.required_version, scope);
       break;
 
-    case ParserItem::kInclude: {
-      const Include& include = *item.u.include;
-      const LoadedFile* child_file = nullptr;
-      Scope* child_scope = nullptr;
-      if (!HandleInclude(include, file, scope, &child_file, &child_scope, err))
-        return false;
-      if (!LoadManifestTree(*child_file, child_scope, out_clumps, err))
+    case ParserItem::kInclude:
+      if (!LoadIncludeOrSubninja(*item_nonconst.u.include, file, scope,
+                                 out_clumps, err))
         return false;
       break;
-    }
 
     case ParserItem::kClump:
       if (!HandleClump(item.u.clump, file, scope, err))
