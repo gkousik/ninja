@@ -92,7 +92,7 @@ void StateTestWithBuiltinRules::AddCatRule(State* state) {
 
 Node* StateTestWithBuiltinRules::GetNode(const string& path) {
   EXPECT_FALSE(strpbrk(path.c_str(), "/\\"));
-  return state_.GetNode(path, 0);
+  return state_.GetNode(state_.root_scope_.GlobalPath(path), 0);
 }
 
 void AssertParse(State* state, const char* input,
@@ -155,14 +155,14 @@ void VerifyGraph(const State& state) {
   //  - Removing an invalid edge for dupbuild=warn doesn't remove the input
   //    nodes.
   for (Node* n : edge_nodes)
-    EXPECT_EQ(n, state.LookupNode(n->path()));
+    EXPECT_EQ(n, state.LookupNode(n->globalPath()));
 
   // Check each node against the set of edges.
   for (const auto& p : state.paths_) {
     Node* n = p.second;
     auto out_edges_vec = n->GetOutEdges();
     std::set<Edge*> out_edges(out_edges_vec.begin(), out_edges_vec.end());
-    EXPECT_EQ(n, state.LookupNode(n->path()));
+    EXPECT_EQ(n, state.LookupNode(n->globalPath()));
     EXPECT_EQ(expected_node_outputs[n], out_edges);
     EXPECT_EQ(expected_node_input[n], n->in_edge());
   }

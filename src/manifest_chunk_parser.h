@@ -64,6 +64,7 @@ struct Clump {
   std::vector<Pool*> pools_;
   std::vector<Edge*> edges_;
   std::vector<DefaultTarget*> default_targets_;
+  std::vector<Scope*> owner_scope_;
 
   /// A count of non-implicit outputs across all edges.
   size_t edge_output_count_ = 0;

@@ -183,9 +183,7 @@ bool DfsParser::HandleInclude(Include& include, const LoadedFile& file,
     include.chdir_.str_ = StringPiece(include.chdir_plus_slash_);
 
     // Create scope so that subninja chdir variable lookups cannot see parent_
-    *child_scope = new Scope(nullptr);
-
-    Warning("subninja chdir: depending on chdir rules not ready yet.");
+    *child_scope = new Scope(scope, include.chdir_plus_slash_);
   } else if (include.new_scope_) {
     *child_scope = new Scope(scope->GetCurrentEndOfScope());
   } else {
@@ -229,6 +227,12 @@ bool DfsParser::LoadIncludeOrSubninja(Include& include, const LoadedFile& file,
     if (!file_set_->Chdir(prev_cwd, err)) {
       *err = "subninja chdir \"" + include.chdir_plus_slash_ + "\": restore " + prev_cwd + ": " + *err;
       return false;
+    }
+
+    // Still need to find all references to Nodes that this Scope owns. The
+    // Node could not have known it was in this Scope until now.
+    if (!out_clumps->empty()) {
+      out_clumps->back()->owner_scope_.push_back(child_scope);
     }
   }
   return true;
@@ -351,7 +355,7 @@ static inline bool AddPathToEdge(State* state, const Edge& edge,
     key = work_buf;
   }
 
-  Node* node = state->GetNode(key, 0);
+  Node* node = state->GetNode(edge.pos_.scope()->GlobalPath(key), 0);
   node->UpdateFirstReference(edge.dfs_location(), slash_bits);
   out_vec->push_back(node);
   return true;
@@ -402,7 +406,7 @@ bool ManifestLoader::AddEdgeToGraph(Edge* edge, const LoadedFile& file,
   // Now that the edge's bindings are available, check whether the edge has a
   // pool. This check requires the full edge+rule evaluation system.
   std::string pool_name;
-  if (!edge->EvaluateVariable(&pool_name, kPool, err, EdgeEval::kParseTime))
+  if (!edge->EvaluateVariable(&pool_name, kPool, edge->pos_.scope(), err, EdgeEval::kParseTime))
     return false;
   if (pool_name.empty()) {
     edge->pool_ = &State::kDefaultPool;
@@ -459,14 +463,14 @@ bool ManifestLoader::AddEdgeToGraph(Edge* edge, const LoadedFile& file,
       --edge->explicit_deps_;
       if (!quiet_) {
         Warning("phony target '%s' names itself as an input; ignoring "
-                "[-w phonycycle=warn]", out->path().c_str());
+                "[-w phonycycle=warn]", out->globalPath().h.data());
       }
     }
   }
 
   // Multiple outputs aren't (yet?) supported with depslog.
   std::string deps_type;
-  if (!edge->EvaluateVariable(&deps_type, kDeps, err, EdgeEval::kParseTime))
+  if (!edge->EvaluateVariable(&deps_type, kDeps, edge->pos_.scope(), err, EdgeEval::kParseTime))
     return false;
   if (!deps_type.empty() && edge->outputs_.size() - edge->implicit_outs_ > 1) {
     return DecorateError(file, edge->parse_state_.final_diag_pos,
@@ -479,13 +483,13 @@ bool ManifestLoader::AddEdgeToGraph(Edge* edge, const LoadedFile& file,
   // to load generated dependency information dynamically, but it must
   // be one of our manifest-specified inputs.
   std::string dyndep;
-  if (!edge->EvaluateVariable(&dyndep, kDyndep, err, EdgeEval::kParseTime))
+  if (!edge->EvaluateVariable(&dyndep, kDyndep, edge->pos_.scope(), err, EdgeEval::kParseTime))
     return false;
   if (!dyndep.empty()) {
     uint64_t slash_bits;
     if (!CanonicalizePath(&dyndep, &slash_bits, err))
       return false;
-    edge->dyndep_ = state_->GetNode(dyndep, 0);
+    edge->dyndep_ = state_->GetNode(edge->pos_.scope()->GlobalPath(dyndep), 0);
     edge->dyndep_->set_dyndep_pending(true);
     vector<Node*>::iterator dgi =
       std::find(edge->inputs_.begin(), edge->inputs_.end(), edge->dyndep_);
@@ -568,14 +572,14 @@ bool ManifestLoader::FinishLoading(const std::vector<Clump*>& clumps,
           if (options_.dupe_edge_action_ == kDupeEdgeActionError) {
             return DecorateError(clump->file_,
                                  edge->parse_state_.final_diag_pos,
-                                 "multiple rules generate " + output->path() +
+                                 "multiple rules generate " + output->globalPath().h.str_view().AsString() +
                                  " [-w dupbuild=err]", err);
           } else {
             if (!quiet_) {
               Warning("multiple rules generate %s. "
                       "builds involving this target will not be correct; "
                       "continuing anyway [-w dupbuild=warn]",
-                      output->path().c_str());
+                      output->globalPath().h.data());
             }
             if (edge->is_implicit_out(i))
               --edge->implicit_outs_;
@@ -611,6 +615,35 @@ bool ManifestLoader::FinishLoading(const std::vector<Clump*>& clumps,
     });
   }
   {
+    // Find all references to Nodes that newly minted Scopes now own. The Node
+    // could not have known it was in this Scope until now. Expressions inside
+    // a chdir were converted to their globalPath() and now get converted back,
+    // but it makes the global node hash table simple. Note globalPath() is
+    // unchanged after this transformation.
+    for (Clump* clump : clumps) {
+      for (Scope* scope : clump->owner_scope_) {
+        const std::string& chdir = scope->chdir();
+        // ConcurrentHashMap has no erase() member - emulate it with 'cleaned'
+        State::Paths cleaned(state_->paths_.size());
+        bool wasCleaned = false;
+
+        for (State::Paths::iterator i = state_->paths_.begin();
+            i != state_->paths_.end(); ++i) {
+          if (!i->first.str_view().AsString().compare(0, chdir.size(), chdir)) {
+            Node* node = i->second;
+            if (node->scope() != scope) {
+              wasCleaned = true;
+              node->resetScopeTo(scope);
+            }
+          }
+          cleaned.insert(std::make_pair(i->second->globalPath().h, i->second));
+        }
+        if (wasCleaned)
+          state_->paths_.swap(cleaned);
+      }
+    }
+  }
+  {
     METRIC_RECORD(".ninja load : default targets");
 
     for (Clump* clump : clumps) {
@@ -623,12 +656,18 @@ bool ManifestLoader::FinishLoading(const std::vector<Clump*>& clumps,
         if (!CanonicalizePath(&path, &slash_bits, &path_err))
           return DecorateError(clump->file_, target->diag_pos_, path_err, err);
 
-        Node* node = state_->LookupNodeAtPos(path, target->pos_.dfs_location());
+        Node* node =
+            state_->LookupNodeAtPos(target->pos_.scope()->GlobalPath(path),
+                                    target->pos_.dfs_location());
         if (node == nullptr) {
           return DecorateError(clump->file_, target->diag_pos_,
                                "unknown target '" + path + "'", err);
         }
-        state_->AddDefault(node);
+        // The .ninja file inside a 'subninja chdir' cannot leak its 'default'
+        // into the parent .ninja file.
+        if (node->scope()->chdir().empty()) {
+          state_->AddDefault(node);
+        }
       }
     }
   }
