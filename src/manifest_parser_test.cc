@@ -152,7 +152,9 @@ TEST_F(ParserTest, InNewline) {
   EXPECT_EQ("cat $in_newline > $out\n", *rule->GetBinding("command"));
 
   Edge* edge = state.edges_[0];
-  EXPECT_EQ("cat in\nin2 > out", edge->EvaluateCommand());
+  EdgeCommand cmd;
+  edge->EvaluateCommand(&cmd);
+  EXPECT_EQ("cat in\nin2 > out", cmd.command);
 }
 
 TEST_F(ParserTest, Variables) {
@@ -170,14 +172,16 @@ TEST_F(ParserTest, Variables) {
 "  extra = $nested2/3\n"));
 
   ASSERT_EQ(2u, state.edges_.size());
-  Edge* edge = state.edges_[0];
+  EdgeCommand cmd;
+  state.edges_[0]->EvaluateCommand(&cmd);
   EXPECT_EQ("ld one-letter-test -pthread -under -o a b c",
-            edge->EvaluateCommand());
+            cmd.command);
   EXPECT_EQ("1/2", state.root_scope_.LookupVariable("nested2"));
 
-  edge = state.edges_[1];
+  cmd.command.clear();
+  state.edges_[1]->EvaluateCommand(&cmd);
   EXPECT_EQ("ld one-letter-test 1/2/3 -under -o supernested x",
-            edge->EvaluateCommand());
+            cmd.command);
 }
 
 TEST_F(ParserTest, VariableScope) {
@@ -193,8 +197,12 @@ TEST_F(ParserTest, VariableScope) {
 ));
 
   ASSERT_EQ(2u, state.edges_.size());
-  EXPECT_EQ("cmd baz a inner", state.edges_[0]->EvaluateCommand());
-  EXPECT_EQ("cmd bar b outer", state.edges_[1]->EvaluateCommand());
+  EdgeCommand cmd;
+  state.edges_[0]->EvaluateCommand(&cmd);
+  EXPECT_EQ("cmd baz a inner", cmd.command);
+  cmd.command.clear();
+  state.edges_[1]->EvaluateCommand(&cmd);
+  EXPECT_EQ("cmd bar b outer", cmd.command);
 }
 
 TEST_F(ParserTest, Continuation) {
@@ -239,10 +247,12 @@ TEST_F(ParserTest, Dollars) {
 "build $x: foo y\n"
 ));
   EXPECT_EQ("$dollar", state.root_scope_.LookupVariable("x"));
+  EdgeCommand cmd;
+  state.edges_[0]->EvaluateCommand(&cmd);
 #ifdef _WIN32
-  EXPECT_EQ("$dollarbar$baz$blah", state.edges_[0]->EvaluateCommand());
+  EXPECT_EQ("$dollarbar$baz$blah", cmd.command);
 #else
-  EXPECT_EQ("'$dollar'bar$baz$blah", state.edges_[0]->EvaluateCommand());
+  EXPECT_EQ("'$dollar'bar$baz$blah", cmd.command);
 #endif
 }
 
@@ -256,7 +266,9 @@ TEST_F(ParserTest, EscapeSpaces) {
   EXPECT_EQ(state.edges_[0]->outputs_[0]->path(), "foo bar");
   EXPECT_EQ(state.edges_[0]->inputs_[0]->path(), "$one");
   EXPECT_EQ(state.edges_[0]->inputs_[1]->path(), "two$ three");
-  EXPECT_EQ(state.edges_[0]->EvaluateCommand(), "something");
+  EdgeCommand cmd;
+  state.edges_[0]->EvaluateCommand(&cmd);
+  EXPECT_EQ(cmd.command, "something");
 }
 
 TEST_F(ParserTest, CanonicalizeFile) {
@@ -951,9 +963,15 @@ TEST_F(ParserTest, SubNinja) {
   EXPECT_TRUE(inner);
 
   ASSERT_EQ(3u, state.edges_.size());
-  EXPECT_EQ("varref outer", state.edges_[0]->EvaluateCommand());
-  EXPECT_EQ("varref inner", state.edges_[1]->EvaluateCommand());
-  EXPECT_EQ("varref outer", state.edges_[2]->EvaluateCommand());
+  EdgeCommand cmd;
+  state.edges_[0]->EvaluateCommand(&cmd);
+  EXPECT_EQ("varref outer", cmd.command);
+  cmd.command.clear();
+  state.edges_[1]->EvaluateCommand(&cmd);
+  EXPECT_EQ("varref inner", cmd.command);
+  cmd.command.clear();
+  state.edges_[2]->EvaluateCommand(&cmd);
+  EXPECT_EQ("varref outer", cmd.command);
 
   // Verify inner scope links back to parent.
   ASSERT_TRUE(state.edges_[1]->pos_.scope()->parent());
@@ -1005,11 +1023,13 @@ TEST_F(ParserTest, SubNinjaChdir) {
   // Verify command includes correct chdir for subninja chdir.
   Edge* edge = inner2node->in_edge();
   EXPECT_TRUE(edge);
+  EdgeCommand cmd;
+  edge->EvaluateCommand(&cmd);
 #ifdef _WIN32
   EXPECT_EQ(NINJA_WIN32_CD_DELIM "b/" NINJA_WIN32_CD_DELIM
-            "foo \"inner\" \"def\" \"inner2\"", edge->EvaluateCommand());
+            "foo \"inner\" \"def\" \"inner2\"", cmd.command);
 #else /* _WIN32 */
-  EXPECT_EQ("cd \"b/\" && foo \"inner\" \"def\" \"inner2\"", edge->EvaluateCommand());
+  EXPECT_EQ("cd \"b/\" && foo \"inner\" \"def\" \"inner2\"", cmd.command);
 #endif /* _WIN32 */
 
   // Verify chdir scope does *not* allow variables from a parent scope to
@@ -1085,20 +1105,24 @@ TEST_F(ParserTest, TwoChdirs) {
 
   // Verify edge command includes correct 'cd test-a'
   Edge* edge = GetNode("test-a/final")->in_edge();
+  EdgeCommand cmd;
+  edge->EvaluateCommand(&cmd);
 #if _WIN32
   EXPECT_EQ(NINJA_WIN32_CD_DELIM "test-a/" NINJA_WIN32_CD_DELIM
-            "cat out1 > final", edge->EvaluateCommand());
+            "cat out1 > final", cmd.command);
 #else
-  EXPECT_EQ("cd \"test-a/\" && cat out1 > final", edge->EvaluateCommand());
+  EXPECT_EQ("cd \"test-a/\" && cat out1 > final", cmd.command);
 #endif
 
   // Verify edge command includes correct 'cd test-b'
+  cmd.command.clear();
   edge = GetNode("test-b/final")->in_edge();
+  edge->EvaluateCommand(&cmd);
 #if _WIN32
   EXPECT_EQ(NINJA_WIN32_CD_DELIM "test-b/" NINJA_WIN32_CD_DELIM
-            "cat out3 > final", edge->EvaluateCommand());
+            "cat out3 > final", cmd.command);
 #else
-  EXPECT_EQ("cd \"test-b/\" && cat out3 > final", edge->EvaluateCommand());
+  EXPECT_EQ("cd \"test-b/\" && cat out3 > final", cmd.command);
 #endif
 }
 

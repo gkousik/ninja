@@ -28,6 +28,7 @@ namespace manifest_chunk {
 
 class ChunkParser {
   const LoadedFile& file_;
+  const bool experimentalEnvvar_;
   Lexer lexer_;
   const char* chunk_end_ = nullptr;
   std::vector<ParserItem>* out_ = nullptr;
@@ -64,8 +65,10 @@ class ChunkParser {
 public:
   ChunkParser(const LoadedFile& file,
               StringPiece chunk_content,
-              std::vector<ParserItem>* out)
+              std::vector<ParserItem>* out,
+              bool experimentalEnvvar)
       : file_(file),
+        experimentalEnvvar_(experimentalEnvvar),
         lexer_(file.filename(), file.content(), chunk_content.data()),
         chunk_end_(chunk_content.data() + chunk_content.size()),
         out_(out) {}
@@ -115,6 +118,7 @@ bool ChunkParser::ParseFileInclude(bool new_scope) {
   // 'ninja: build.ninja:NNN: unexpected indent'. This might be a slightly more
   // helpful message.
   if (lexer_.PeekToken(Lexer::INDENT)) {
+    (void)experimentalEnvvar_;  // TODO: add envvar here.
     if (!new_scope)
       return LexerError("indent after 'include' line is invalid.");
     if (!lexer_.PeekToken(Lexer::CHDIR))
@@ -379,6 +383,8 @@ bool ChunkParser::ParseEdge() {
 
   Clump* clump = MakeClump();
   edge->pos_ = clump->AllocNextPos();
+  // Can't edge->onPosResolvedToScope(clump->pos_.scope.scope) right here, since
+  // clump->pos_.scope.scope is not set until DfsParser::HandleClump().
   clump->edges_.push_back(edge);
   clump->edge_output_count_ += edge->explicit_outs_;
   return true;
@@ -417,8 +423,8 @@ bool ChunkParser::ParseChunk() {
 }
 
 void ParseChunk(const LoadedFile& file, StringPiece chunk_content,
-                std::vector<ParserItem>* out) {
-  ChunkParser parser(file, chunk_content, out);
+                std::vector<ParserItem>* out, bool experimentalEnvvar) {
+  ChunkParser parser(file, chunk_content, out, experimentalEnvvar);
   if (!parser.ParseChunk()) {
     assert(!out->empty());
     assert(out->back().kind == ParserItem::kError);

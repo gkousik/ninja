@@ -47,7 +47,8 @@ static bool DecorateError(const LoadedFile& file, size_t file_offset,
 /// Split a single manifest file into chunks, parse the chunks in parallel, and
 /// return the resulting parser output.
 static std::vector<ParserItem> ParseManifestChunks(const LoadedFile& file,
-                                                   ThreadPool* thread_pool) {
+                                                   ThreadPool* thread_pool,
+                                                   bool experimentalEnvvar) {
   std::vector<ParserItem> result;
   const std::vector<StringPiece> chunk_views =
     manifest_chunk::SplitManifestIntoChunks(file.content_with_nul());
@@ -55,9 +56,9 @@ static std::vector<ParserItem> ParseManifestChunks(const LoadedFile& file,
   METRIC_RECORD(".ninja load : parse chunks");
 
   for (std::vector<ParserItem>& chunk_items :
-      ParallelMap(thread_pool, chunk_views, [&file](StringPiece view) {
+      ParallelMap(thread_pool, chunk_views, [&file, experimentalEnvvar](StringPiece view) {
     std::vector<ParserItem> chunk_items;
-    manifest_chunk::ParseChunk(file, view, &chunk_items);
+    manifest_chunk::ParseChunk(file, view, &chunk_items, experimentalEnvvar);
     return chunk_items;
   })) {
     std::move(chunk_items.begin(), chunk_items.end(),
@@ -130,8 +131,8 @@ bool ManifestFileSet::LoadFile(const std::string& filename,
 }
 
 struct DfsParser {
-  DfsParser(ManifestFileSet* file_set, State* state, ThreadPool* thread_pool)
-      : file_set_(file_set), state_(state), thread_pool_(thread_pool) {}
+  DfsParser(ManifestFileSet* file_set, State* state, ThreadPool* thread_pool, const ManifestParserOptions& options)
+      : options_(options), file_set_(file_set), state_(state), thread_pool_(thread_pool) {}
 
 private:
   void HandleRequiredVersion(const RequiredVersion& item, Scope* scope);
@@ -146,6 +147,7 @@ private:
                    std::string* err);
 
 public:
+  const ManifestParserOptions options_;
   /// Load the tree of manifest files and do initial parsing of all the chunks.
   /// This function always runs on the main thread.
   bool LoadManifestTree(const LoadedFile& file, Scope* scope,
@@ -183,7 +185,7 @@ bool DfsParser::HandleInclude(Include& include, const LoadedFile& file,
     include.chdir_.str_ = StringPiece(include.chdir_plus_slash_);
 
     // Create scope so that subninja chdir variable lookups cannot see parent_
-    *child_scope = new Scope(scope, include.chdir_plus_slash_);
+    *child_scope = new Scope(scope, include.chdir_plus_slash_, NULL /*cmdEnviron*/);
     (*child_scope)->AddAllBuiltinRules();
   } else if (include.new_scope_) {
     *child_scope = new Scope(scope->GetCurrentEndOfScope());
@@ -277,6 +279,11 @@ bool DfsParser::HandleClump(Clump* clump, const LoadedFile& file, Scope* scope,
       }
     }
   }
+  {
+    for (Edge* edge : clump->edges_) {
+      edge->onPosResolvedToScope(clump->pos_.scope.scope);
+    }
+  }
   for (Pool* pool : clump->pools_) {
     if (!HandlePool(pool, file, err)) {
       return false;
@@ -288,7 +295,7 @@ bool DfsParser::HandleClump(Clump* clump, const LoadedFile& file, Scope* scope,
 bool DfsParser::LoadManifestTree(const LoadedFile& file, Scope* scope,
                                  std::vector<Clump*>* out_clumps,
                                  std::string* err) {
-  std::vector<ParserItem> items = ParseManifestChunks(file, thread_pool_);
+  std::vector<ParserItem> items = ParseManifestChunks(file, thread_pool_, options_.experimentalEnvvar);
   ReserveSpaceInScopeTables(scope, items);
 
   // With the chunks parsed, do a depth-first parse of the ninja manifest using
@@ -703,7 +710,7 @@ bool ManifestLoader::FinishLoading(const std::vector<Clump*>& clumps,
 
 bool ManifestLoader::Load(ManifestFileSet* file_set,
                           const LoadedFile& root_manifest, std::string* err) {
-  DfsParser dfs_parser(file_set, state_, thread_pool_);
+  DfsParser dfs_parser(file_set, state_, thread_pool_, options_);
   std::vector<Clump*> clumps;
   if (!dfs_parser.LoadManifestTree(root_manifest, &state_->root_scope_, &clumps,
                                    err)) {
