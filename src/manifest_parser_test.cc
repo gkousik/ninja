@@ -1067,6 +1067,113 @@ TEST_F(ParserTest, SubNinjaChdirNoSuchFile) {
   ASSERT_EQ("/", VerifyCwd(fs_));
 }
 
+TEST_F(ParserTest, SubNinjaChdirExperimentalEnvvarFlag) {
+  EXPECT_TRUE(fs_.MakeDir("b"));
+  fs_.Create("b/foo.ninja", "");
+
+  for (int i = 0; i < 2; i++) {
+    State unusedState;
+    ManifestParserOptions parser_opts;
+    parser_opts.experimentalEnvvar = !!i;
+    ManifestParser parser(&unusedState, &fs_, parser_opts);
+    string err;
+    bool parsed = parser.ParseTest(
+      "builddir = a/\n"
+      "rule varref\n"
+      "  command = varref $var\n"
+      "var = outer\n"
+      "build $builddir/outer: varref\n"
+      "subninja b/foo.ninja\n"
+      "  env a = b\n"
+      "  chdir = b\n"
+      "build $builddir/outer2: varref\n", &err);
+    EXPECT_EQ(parsed, parser_opts.experimentalEnvvar);
+    if (parser_opts.experimentalEnvvar) {
+      ASSERT_EQ(err, "");
+    } else {
+      ASSERT_TRUE(err.find("only 'chdir =' is allowed after 'subninja' line.") != string::npos);
+    }
+  }
+}
+
+TEST_F(ParserTest, SubNinjaChdirExperimentalEnvvarDup) {
+  EXPECT_TRUE(fs_.MakeDir("b"));
+  fs_.Create("b/foo.ninja", "");
+
+  ManifestParserOptions parser_opts;
+  parser_opts.experimentalEnvvar = true;
+  ManifestParser parser(&state, &fs_, parser_opts);
+  string err;
+  ASSERT_FALSE(parser.ParseTest(
+      "builddir = a/\n"
+      "rule varref\n"
+      "  command = varref $var\n"
+      "var = outer\n"
+      "build $builddir/outer: varref\n"
+      "subninja b/foo.ninja\n"
+      "  env dup = duplicate\n"
+      "  env dup = duplicate\n"
+      "  chdir = b\n"
+      "build $builddir/outer2: varref\n", &err));
+  ASSERT_TRUE(err.find("duplicate env var") != string::npos);
+}
+
+TEST_F(ParserTest, SubNinjaChdirExperimentalEnvvarSuccess) {
+  EXPECT_TRUE(fs_.MakeDir("b"));
+  fs_.Create("b/foo.ninja",
+    "var = inner\n"
+    "rule innerrule\n"
+    "  command = foo \"$var\" \"$in\" \"$out\"\n"
+    "build $builddir/inner: innerrule abc\n"
+    "build inner2: innerrule def\n");
+
+  ManifestParserOptions parser_opts;
+  parser_opts.experimentalEnvvar = true;
+  ManifestParser parser(&state, &fs_, parser_opts);
+  string err;
+  ASSERT_TRUE(parser.ParseTest(
+      "builddir = a/\n"
+      "rule varref\n"
+      "  command = varref $var\n"
+      "var = outer\n"
+      "build $builddir/outer: varref\n"
+      "subninja b/foo.ninja\n"
+      "  env SubNinjaChdirExperimentalEnvvarSuccess = success\n"
+      "  chdir = b\n"
+      "build $builddir/outer2: varref\n", &err));
+  ASSERT_EQ(err, "");
+
+  ASSERT_EQ(1u, fs_.files_read_.size());
+  ASSERT_EQ("/", VerifyCwd(fs_));
+
+  EXPECT_EQ("b/foo.ninja", fs_.files_read_[0]);
+  HashedStrView outer("a/outer");
+  Node* outerNode = state.LookupNode(GlobalPathStr{outer});
+  EXPECT_TRUE(outerNode);
+  HashedStrView outer2("a/outer2");
+  EXPECT_TRUE(state.LookupNode(GlobalPathStr{outer2}));
+
+  // Verify that the scope does know it is a chdir.
+  ASSERT_EQ(state.edges_[1]->pos_.scope()->chdir(), "b/");
+  // Verify parent ninja file does not customize environment.
+  EdgeCommand cmd0;
+  state.edges_[0]->EvaluateCommand(&cmd0);
+  ASSERT_EQ(cmd0.env, NULL);
+  // Verify subninja chdir with custom environment.
+  EdgeCommand cmd1;
+  state.edges_[1]->EvaluateCommand(&cmd1);
+  ASSERT_NE(cmd1.env, NULL);
+  bool found = false;
+  for (char** p = cmd1.env; *p; p++) {
+    std::string var = *p;
+    if (var.find("SubNinjaChdirExperimentalEnvvarSuccess") == 0) {
+      found = true;
+      ASSERT_EQ(var, "SubNinjaChdirExperimentalEnvvarSuccess=success");
+    }
+  }
+  ASSERT_TRUE(found && "env var \"SubNinjaChdirExperimentalEnvvarSuccess\" not found");
+}
+
 TEST_F(ParserTest, TwoChdirs) {
   fs_.MakeDir("test-a");
   fs_.Create("test-a/a.ninja",
@@ -1189,6 +1296,39 @@ TEST_F(ParserTest, SubNinjaErrors) {
               "                      ^ near here"
               , err);
     EXPECT_EQ("/", VerifyCwd(fs));  // Verify cwd was restored
+  }
+
+  {
+    // Test that subninja chdir with an env statement that tries to set
+    // the "chdir" variable is an error.
+    VirtualFileSystem fs;
+    fs.MakeDir("test-a");
+    fs.Create("test-a/a.ninja",
+      "rule cat\n"
+      "  command = cat $in > $out\n"
+      "build out2: cat in1\n"
+      "build out1: cat in2\n"
+      "build final: cat out1\n");
+    ManifestParserOptions parser_opts;
+    parser_opts.experimentalEnvvar = true;
+    State local_state;
+    ManifestParser parser(&local_state, &fs, parser_opts);
+    string err;
+    EXPECT_FALSE(parser.ParseTest(
+"rule pipe-through-test-a\n"
+"    command = $in | test-a/final > $out\n"
+"\n"
+"build foo: pipe-through-test-a | test-a/final\n"
+"\n"
+"default foo\n"
+"\n"
+"subninja test-a/a.ninja\n"
+"    env chdir = test-a\n"
+"    chdir = test-a\n", &err));
+    EXPECT_EQ("input:9: reserved word chdir: \"env chdir =\"\n"
+              "    env chdir = test-a\n"
+              "        ^ near here"
+              , err);
   }
 
   {

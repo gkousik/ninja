@@ -118,11 +118,41 @@ bool ChunkParser::ParseFileInclude(bool new_scope) {
   // 'ninja: build.ninja:NNN: unexpected indent'. This might be a slightly more
   // helpful message.
   if (lexer_.PeekToken(Lexer::INDENT)) {
-    (void)experimentalEnvvar_;  // TODO: add envvar here.
     if (!new_scope)
       return LexerError("indent after 'include' line is invalid.");
-    if (!lexer_.PeekToken(Lexer::CHDIR))
+    for (;;) {
+      if (lexer_.PeekToken(Lexer::CHDIR)) {
+        break;
+      }
+      if (experimentalEnvvar_) {
+        // Accept one or more "env foo = bar\n<indent><chdir>"
+        StringPiece envkey;
+        if (lexer_.ReadIdent(&envkey)) {
+          if (envkey.compare("env")) {
+            return LexerError("unexpected \"" + envkey.AsString() +
+                              "\". Only 'chdir =' allowed here.");
+          }
+          StringPiece key;
+          StringPiece val;
+          if (lexer_.ReadIdent(&key)) {
+            if (!key.compare("chdir")) {
+              return LexerError("reserved word chdir: \"env chdir =\"");
+            }
+            if (ExpectToken(Lexer::EQUALS) && lexer_.ReadIdent(&val)) {
+              auto p = include->envvar.emplace(key.AsString(), val.AsString());
+              if (!p.second) {
+                return LexerError("duplicate env var");
+              }
+              if (ExpectToken(Lexer::NEWLINE) && ExpectToken(Lexer::INDENT)) {
+                continue;
+              }
+            }
+          }
+          return LexerError("looking for chdir, did not find \"env VAR = value1 value2 value3\"");
+        }
+      }
       return LexerError("only 'chdir =' is allowed after 'subninja' line.");
+    }
     if (!ExpectToken(Lexer::EQUALS))
       return LexerError("only 'chdir =' is allowed after 'subninja' line.");
     if (!lexer_.ReadPath(&include->chdir_, &err))

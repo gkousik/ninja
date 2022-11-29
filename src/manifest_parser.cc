@@ -35,6 +35,8 @@ using manifest_chunk::Include;
 using manifest_chunk::ParserItem;
 using manifest_chunk::RequiredVersion;
 
+extern char** environ;
+
 namespace {
 
 static bool DecorateError(const LoadedFile& file, size_t file_offset,
@@ -185,7 +187,39 @@ bool DfsParser::HandleInclude(Include& include, const LoadedFile& file,
     include.chdir_.str_ = StringPiece(include.chdir_plus_slash_);
 
     // Create scope so that subninja chdir variable lookups cannot see parent_
-    *child_scope = new Scope(scope, include.chdir_plus_slash_, NULL /*cmdEnviron*/);
+    char** cmdEnviron = NULL;
+    if (!include.envvar.empty()) {
+      // Make a copy of environ and update or add envvar's.
+      size_t len = 1;  // len of 1 counts the NULL terminator.
+      for (char** p = environ; *p; p++) {
+        len++;
+      }
+      len += include.envvar.size();
+      cmdEnviron = new char*[len];
+      char** dst = cmdEnviron;
+      for (char** p = environ; *p; p++) {
+        const char* eq = strchr(*p, '=');
+        if (eq && eq > *p &&
+            include.envvar.find(string(*p, eq - *p)) != include.envvar.end()) {
+          // include.envvar overrides the var at *p. Skip *p.
+          continue;
+        }
+        size_t varlen = strlen(*p);
+        *dst = new char[varlen + 1];
+        strncpy(*dst, *p, varlen);
+        (*dst)[varlen] = 0;
+        dst++;
+      }
+      for (auto i = include.envvar.begin(); i != include.envvar.end(); i++) {
+        string out = i->first + "=" + i->second;
+        *dst = new char[out.size() + 1];
+        strncpy(*dst, out.c_str(), out.size());
+        (*dst)[out.size()] = 0;
+        dst++;
+      }
+      *dst = NULL;  // terminate the new cmdEnviron with a NULL pointer
+    }
+    *child_scope = new Scope(scope, include.chdir_plus_slash_, cmdEnviron);
     (*child_scope)->AddAllBuiltinRules();
   } else if (include.new_scope_) {
     *child_scope = new Scope(scope->GetCurrentEndOfScope());
