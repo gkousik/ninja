@@ -84,7 +84,27 @@ bool DryRunCommandRunner::WaitForCommand(Result* result) {
    return true;
 }
 
-typedef std::unordered_map<HashedStrView, int64_t> WeightDataSource;
+struct WeightDataSource {
+public:
+  void Put(const std::string& key, int64_t value) {
+    const auto& [it, inserted] = key_data_.emplace(key);
+    if (inserted) {
+      map_data_.try_emplace(*it, value);
+    } else {
+      map_data_.find(*it)->second = value;
+    }
+  }
+
+  std::optional<int64_t> Get(const HashedStrView& key) const {
+    if (auto it = map_data_.find(key); it != map_data_.end()) {
+      return it->second;
+    }
+    return {};
+  }
+private:
+  std::unordered_set<HashedStr> key_data_;
+  std::unordered_map<HashedStrView, int64_t> map_data_;
+};
 
 // Get weight from data source, it isn't related to Edge.weight because
 // Edge.weight is used for task distribution across pools which we don't
@@ -96,8 +116,8 @@ int64_t GetWeight(const WeightDataSource& data_source, Edge* edge) {
   if (edge->is_phony()) {
     return 1;
   }
-  if (auto it = data_source.find(edge->outputs_[0]->globalPath().h); it != data_source.end()) {
-    return it->second;
+  if (const auto& opt = data_source.Get(edge->outputs_[0]->globalPath().h)) {
+    return *opt;
   }
   return 1;
 }
@@ -615,8 +635,6 @@ Node* Builder::AddTarget(const string& name, string* err) {
 void Builder::RefreshPriority(const std::vector<Node*>& start_nodes) {
   METRIC_RECORD("RefreshPriority");
   WeightDataSource data_source;
-  // To keep HashedStrView in WeightDataSource valid.
-  std::vector<HashedStr> paths;
   if (config_.weight_list_path) {
     std::ifstream file(config_.weight_list_path.value());
     std::string line;
@@ -627,7 +645,7 @@ void Builder::RefreshPriority(const std::vector<Node*>& start_nodes) {
         char* idx;
         int64_t weight = std::strtoll(raw_weight.c_str(), &idx, 10);
         if (idx != nullptr) {
-          data_source[paths.emplace_back(path)] = weight;
+          data_source.Put(path, weight);
         }
       }
     }
