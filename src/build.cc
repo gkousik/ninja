@@ -86,8 +86,8 @@ bool DryRunCommandRunner::WaitForCommand(Result* result) {
 
 struct WeightDataSource {
 public:
-  void Put(const std::string& key, int64_t value) {
-    const auto& [it, inserted] = key_data_.emplace(key);
+  void Put(std::string&& key, int64_t value) {
+    const auto& [it, inserted] = key_data_.emplace(std::move(key));
     if (inserted) {
       map_data_.try_emplace(*it, value);
     } else {
@@ -116,10 +116,7 @@ int64_t GetWeight(const WeightDataSource& data_source, Edge* edge) {
   if (edge->is_phony()) {
     return 1;
   }
-  if (const auto& opt = data_source.Get(edge->outputs_[0]->globalPath().h)) {
-    return *opt;
-  }
-  return 1;
+  return data_source.Get(edge->outputs_[0]->globalPath().h).value_or(1);
 }
 }  // namespace
 
@@ -645,7 +642,7 @@ void Builder::RefreshPriority(const std::vector<Node*>& start_nodes) {
         char* idx;
         int64_t weight = std::strtoll(raw_weight.c_str(), &idx, 10);
         if (idx != nullptr) {
-          data_source.Put(path, weight);
+          data_source.Put(std::move(path), weight);
         }
       }
     }
