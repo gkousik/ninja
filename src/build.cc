@@ -677,7 +677,8 @@ void Builder::RefreshPriority(const std::vector<Node*>& start_nodes) {
 
       std::set<Edge*, EdgeCmp> next_edges;
       for (auto* next_node : e->inputs_) {
-        if (!next_node) {
+        // Skip if the next node isn't dirty because actual build also skips the node.
+        if (!next_node || !next_node->dirty()) {
           continue;
         }
         auto* next_e = next_node->in_edge();
