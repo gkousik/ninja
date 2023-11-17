@@ -14,6 +14,7 @@
 
 #include "graph.h"
 
+#include <iostream>
 #include <deque>
 #include <unordered_set>
 #include <assert.h>
@@ -656,6 +657,10 @@ bool Edge::EvaluateCommand(std::string* out_append, bool incl_rsp_file,
       out_append->append(rspfile_content);
     }
   }
+
+  // if (out_append->size() > 0) {
+  //   std::cout << "Command to be run: " << *out_append << "\n";
+  // }
   return true;
 }
 
@@ -663,6 +668,12 @@ void Edge::EvaluateCommand(EdgeCommand* out, bool incl_rsp_file) {
   std::string err;
   if (!EvaluateCommand(&out->command, incl_rsp_file, &err))
     Fatal("%s", err.c_str());
+
+  for (uint i = 0; i < outputs_.size(); ++i) {
+    out->expectedOutputs.push_back(outputs_[i]->path());
+  }
+  out->expectedOutputs.push_back(GetUnescapedDepfile());
+
   out->use_console = use_console();
   out->env = cmdEnviron;
 }

@@ -301,6 +301,7 @@ struct EdgeCommand {
   std::string command;
   bool use_console = false;
   char** env = NULL;
+  std::vector<std::string> expectedOutputs;
 };
 
 struct EdgeEval {

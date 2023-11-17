@@ -14,6 +14,9 @@
 
 #include "subprocess.h"
 
+#include <iostream>
+#include <sstream>
+#include <fstream>
 #include <sys/select.h>
 #include <assert.h>
 #include <errno.h>
@@ -116,8 +119,64 @@ bool Subprocess::Start(SubprocessSet* set, const EdgeCommand& cmd,
   if (err != 0)
     Fatal("posix_spawnattr_setflags: %s", strerror(err));
 
-  const char* spawned_args[] = { "/bin/sh", "-c", cmd.command.c_str(), NULL };
-  err = posix_spawn(&pid_, "/bin/sh", &action, &attr,
+  // const char* spawned_args[] = { "/bin/sh", "-c", cmd.command.c_str(), NULL };
+  // err = posix_spawn(&pid_, "/bin/sh", &action, &attr,
+  //       const_cast<char**>(spawned_args), cmd.env ? cmd.env : environ);
+  // if (err != 0)
+  //   Fatal("posix_spawn: %s", strerror(err));
+
+  std::stringstream allOutputs;
+  allOutputs << "--output_files=";
+  for (uint i = 0 ; i < cmd.expectedOutputs.size(); ++i) {
+    // std::cout << "Output: " << cmd.expectedOutputs[i] << "\n";
+    allOutputs << cmd.expectedOutputs[i];
+    if (i+1 < cmd.expectedOutputs.size()) {
+      allOutputs << ",";
+    }
+  }
+
+  // std::cout << "All outputs: " << allOutputs.str().c_str() << "\n";
+  std::string outputsStr = allOutputs.str();
+  if (outputsStr.size() > 2048) {
+    srand((unsigned) time(NULL));
+    int random = rand();
+    std::stringstream fname;
+    fname << "/tmp/ninja_tmp/output_" << random << ".rsp";
+    std::ofstream out(fname.str());
+    out << outputsStr;
+    out.close();
+
+    outputsStr = "--output_files=@" + fname.str();
+  }
+
+  const char* spawned_args[] = {
+    "prebuilts/remoteexecution-client/live/rewrapper",
+    "--labels=type=tool",
+    "--exec_strategy=local",
+    "--server_address=unix:///tmp/reproxy.sock",
+    "--platform=\"Pool=default,container-image=docker://gcr.io/androidbuild-re-dockerimage/android-build-remoteexec-image@sha256:582efb38f0c229ea39952fff9e132ccbe183e14869b39888010dacf56b360d62\"",
+    outputsStr.c_str(),
+    "--",
+    cmd.command.c_str(),
+    NULL
+    };
+
+  const char *printCmd = std::getenv("NINJA_PRINT_COMMAND");
+  if (cmd.command.size() > 0 && printCmd != NULL && std::string(printCmd) == "true") {
+    std::cout << "Just command: " << cmd.command << "\n";
+    std::cout << "Command to be run: ";
+    for (int i = 0; i < 7; ++i) {
+      std::cout << spawned_args [i] << " ";
+    }
+    std::cout << "\n";
+    std::cout << "Environment: ";
+    for (char** p = environ; *p; p++) {
+      std::cout << (*p) << " ";
+    }
+    std::cout << "\n";
+  }
+
+  err = posix_spawn(&pid_, "prebuilts/remoteexecution-client/live/rewrapper", &action, &attr,
         const_cast<char**>(spawned_args), cmd.env ? cmd.env : environ);
   if (err != 0)
     Fatal("posix_spawn: %s", strerror(err));
